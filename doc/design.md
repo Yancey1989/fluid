@@ -101,7 +101,7 @@ spec:
 We hope Fluid users could represent it by the following line.
 
 ```python
-skaffold_git = fluid.Git(
+skaffold_git = fluid.git_resource(
     revision="master", 
     url="https://github.com/GoogleContainerTools/skaffold)
 ```
@@ -125,7 +125,7 @@ spec:
 We hope Fluid users could represent the above YAML file by the following line.
 
 ```python
-skaffold_image_leeroy_web = fluid.Image(
+skaffold_image_leeroy_web = fluid.image_resource(
     url="gcr.io/wangkuiyi/leeroy-web")
 ```
 
@@ -142,7 +142,7 @@ According to the [document](https://github.com/tektoncd/pipeline/blob/master/doc
 The following example from the [Tekton tutorial](https://github.com/tektoncd/pipeline/blob/master/docs/tutorial.md#task-inputs-and-outputs) takes an input resource, an output resource, and two input parameters.
 
 ```yaml
-goapiVersion: tekton.dev/v1alpha1
+apiVersion: tekton.dev/v1alpha1
 kind: Task
 metadata:
   name: build-docker-image-from-git-source
@@ -185,138 +185,116 @@ We hope Fluid users could represent it by the following Python/Fluid code.
 
 ```python
 def build_docker_image_from_git_source(
+        docker_source: "input,git",
+        built_image: "output,image",
+        path_to_dockerfile="/workspace/docker-source/Dockerfile",
+        path_to_context="/workspace/docker-source"):
+    '''Define a Tekton Task that builds a Docker image from a Git repo'''
+    couler.step(image="gcr.io/kaniko-project/executor:v0.14.0",
+               cmd=["/kaniko/executor"],
+               args=[f"--dockerfile={path_to_dockerfile}",
+                     f"--destination={built_image.url}",
+                     f"--context={path_to_context}"],
+               env={"DOCKER_CONFIG": "/tekton/home/.docker/"})
 ```
 
 ### Pipeline
 
-A Pipeline object is like function decleration.
+A Pipeline object is like function declaration.
 
-A Pipeline in Tekton defined an ordered series of Tasks. A valid Pipeline declearation
-must include a reference to at last one `Task`, for example:
+A Pipeline in Tekton defined an ordered series of Tasks. Users can specify whether
+the output of a `Task` is used as an input for the next `Task` using `from` property on `PipelineResources`
 
-``` yaml
-tasks:
-  - name: build-the-image
-    taskRef:
-      name: build-push
-```
-
-The `Pipeline Tasks` in a Pipeline can be connected and run as a Directed Acyclic Graph(DAG), each of the Pipeline Tasks is a node, which can be connected with:
-
-- `runAfter` clauses on the `Pipeline Tasks`.
-- `from` clauses on the `PipelineResources` needed by a `Task`.
-
-For an example `Pipeline` spec with `runAfter`:
+As the following example comes from [Tekton's tutorial](https://github.com/tektoncd/pipeline/blob/master/docs/tutorial.md#creating-and-running-a-pipeline)
 
 ``` yaml
-- name: lint-repo
-  taskRef:
-    name: pylint
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: tutorial-pipeline
+spec:
   resources:
-    inputs:
-      - name: workspace
-        resource: my-repo
-- name: test-app
-  taskRef:
-    name: make-test
-  resources:
-    inputs:
-      - name: workspace
-        resource: my-repo
-- name: build-app
-  taskRef:
-    name: kaniko-build-app
-  runAfter:
-    - test-app
-  resources:
-    inputs:
-      - name: workspace
-        resource: my-repo
-    outputs:
-      - name: image
-        resource: my-app-image
-- name: build-frontend
-  taskRef:
-    name: kaniko-build-frontend
-  runAfter:
-    - test-app
-  resources:
-    inputs:
-      - name: workspace
-        resource: my-repo
-    outputs:
-      - name: image
-        resource: my-frontend-image
-- name: deploy-all
-  taskRef:
-    name: deploy-kubectl
-  resources:
-    inputs:
-      - name: my-app-image
-        resource: my-app-image
-        from:
-          - build-app
-      - name: my-frontend-image
-        resource: my-frontend-image
-        from:
-          - build-frontend
+    - name: source-repo
+      type: git
+    - name: web-image
+      type: image
+  tasks:
+    - name: build-skaffold-web
+      taskRef:
+        name: build-docker-image-from-git-source
+      params:
+        - name: pathToDockerFile
+          value: Dockerfile
+        - name: pathToContext
+          value: /workspace/docker-source/examples/microservices/leeroy-web #configure: may change according to your source
+      resources:
+        inputs:
+          - name: docker-source
+            resource: source-repo
+        outputs:
+          - name: builtImage
+            resource: web-image
+    - name: deploy-web
+      taskRef:
+        name: deploy-using-kubectl
+      resources:
+        inputs:
+          - name: source
+            resource: source-repo
+          - name: image
+            resource: web-image
+            from:
+              - build-skaffold-web
+      params:
+        - name: path
+          value: /workspace/source/examples/microservices/leeroy-web/kubernetes/deployment.yaml #configure: may change according to your source
+        - name: yamlPathToImage
+          value: "spec.template.spec.containers[0].image"
 ```
 
-This will result the following execution graph:
-
-``` text
-        |            |
-        v            v
-     test-app    lint-repo
-    /        \
-   v          v
-build-app  build-frontend
-   \          /
-    v        v
-    deploy-all
-```
-
-In Python, a function is like a node of the DAG, which connected by the input
-and of output of the functions.
-
-We hope Fluid users can write the following program to express a DAG with `fluid.pipeline`:
+We hope Fluid users can write the following program to express the above YAML file:
 
 ``` python
-@fluid.task
-def pylint():
-    fluid.step(...)
-
-@fluid.task
-def make_test():
-    fluid.step(...)
-
-@fluid.task
-def kaniko_build_app():
-    fluid.step(...)
-
-@fluid.task
-def kaniko_build_frontend():
-    fluid.step(...)
-
-@fluid.task
-def deploy_kubectl():
-    fluid.step(...)
-
 @fluid.pipeline
-def dag_demo():
-    lint_repo = pylint()
-    test_app = make_test()
-    build_app = kaniko_build_app().run_after(test_app)
-    build_frontend = kaniko_build_frontend().run_after(test_app)
-    deploy_all = deploy_kubectl()
-    deploy_all.inputs.my_frontend_image.from(build_app)
-    deploy_all.inputs.my_app_image.from(build_frontend)
+def tutorial(source_repo:"resource,git", web_image="resource,image"):
+    build_skaffold_web = build_docker_image_from_git_source(source_repo, web_image)
+
+    deploy_web = deploy_using_kubectl(source_repo, web_image)
+    deploy_web.web_image.from(build_skaffold_web)
 ```
 
 ### PipelineRun
 
-A PipelineRun object is like a function invocation:
+A PipelineRun object is like a function invocation.
+
+A PipelineRun object defines a call to a Pipeline. The following is a PipelineRun example from [Tekton's tutorial](https://github.com/tektoncd/pipeline/blob/master/docs/tutorial.md#creating-and-running-a-pipeline):
+
+``` yaml
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  name: tutorial-pipeline-run-1
+spec:
+  serviceAccountName: tutorial-service
+  pipelineRef:
+    name: tutorial-pipeline
+  resources:
+    - name: source-repo
+      resourceRef:
+        name: skaffold-git
+    - name: web-image
+      resourceRef:
+        name: skaffold-image-leeroy-web
+```
+
+We hope Fluid users write the following program:
 
 ``` python
-build_pipeline()
+skaffold_git = fluid.git_resource(
+    revision="master",
+    url="https://github.com/GoogleContainerTools/skaffold")
+skaffold_image_leeroy_web = fluid.image_resource(
+    url="gcr.io/wangkuiyi/leeroy-web")
+
+tutorial(skaffold_git, skaffold_image_leeroy_web)
 ```
