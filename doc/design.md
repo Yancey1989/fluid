@@ -186,3 +186,137 @@ We hope Fluid users could represent it by the following Python/Fluid code.
 ```python
 def build_docker_image_from_git_source(
 ```
+
+### Pipeline
+
+A Pipeline object is like function decleration.
+
+A Pipeline in Tekton defined an ordered series of Tasks. A valid Pipeline declearation
+must include a reference to at last one `Task`, for example:
+
+``` yaml
+tasks:
+  - name: build-the-image
+    taskRef:
+      name: build-push
+```
+
+The `Pipeline Tasks` in a Pipeline can be connected and run as a Directed Acyclic Graph(DAG), each of the Pipeline Tasks is a node, which can be connected with:
+
+- `runAfter` clauses on the `Pipeline Tasks`.
+- `from` clauses on the `PipelineResources` needed by a `Task`.
+
+For an example `Pipeline` spec with `runAfter`:
+
+``` yaml
+- name: lint-repo
+  taskRef:
+    name: pylint
+  resources:
+    inputs:
+      - name: workspace
+        resource: my-repo
+- name: test-app
+  taskRef:
+    name: make-test
+  resources:
+    inputs:
+      - name: workspace
+        resource: my-repo
+- name: build-app
+  taskRef:
+    name: kaniko-build-app
+  runAfter:
+    - test-app
+  resources:
+    inputs:
+      - name: workspace
+        resource: my-repo
+    outputs:
+      - name: image
+        resource: my-app-image
+- name: build-frontend
+  taskRef:
+    name: kaniko-build-frontend
+  runAfter:
+    - test-app
+  resources:
+    inputs:
+      - name: workspace
+        resource: my-repo
+    outputs:
+      - name: image
+        resource: my-frontend-image
+- name: deploy-all
+  taskRef:
+    name: deploy-kubectl
+  resources:
+    inputs:
+      - name: my-app-image
+        resource: my-app-image
+        from:
+          - build-app
+      - name: my-frontend-image
+        resource: my-frontend-image
+        from:
+          - build-frontend
+```
+
+This will result the following execution graph:
+
+``` text
+        |            |
+        v            v
+     test-app    lint-repo
+    /        \
+   v          v
+build-app  build-frontend
+   \          /
+    v        v
+    deploy-all
+```
+
+In Python, a function is like a node of the DAG, which connected by the input
+and of output of the functions.
+
+We hope Fluid users can write the following program to express a DAG with `fluid.pipeline`:
+
+``` python
+@fluid.task
+def pylint():
+    fluid.step(...)
+
+@fluid.task
+def make_test():
+    fluid.step(...)
+
+@fluid.task
+def kaniko_build_app():
+    fluid.step(...)
+
+@fluid.task
+def kaniko_build_frontend():
+    fluid.step(...)
+
+@fluid.task
+def deploy_kubectl():
+    fluid.step(...)
+
+@fluid.pipeline
+def dag_demo():
+    lint_repo = pylint()
+    test_app = make_test()
+    build_app = kaniko_build_app().run_after(test_app)
+    build_frontend = kaniko_build_frontend().run_after(test_app)
+    deploy_all = deploy_kubectl()
+    deploy_all.inputs.my_frontend_image.from(build_app)
+    deploy_all.inputs.my_app_image.from(build_frontend)
+```
+
+### PipelineRun
+
+A PipelineRun object is like a function invocation:
+
+``` python
+build_pipeline()
+```
