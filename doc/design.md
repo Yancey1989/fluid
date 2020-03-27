@@ -184,6 +184,7 @@ spec:
 We hope Fluid users could represent it by the following Python/Fluid code.
 
 ```python
+@fluid.task
 def build_docker_image_from_git_source(
         docker_source: "input,git",
         built_image: "output,image",
@@ -200,9 +201,9 @@ def build_docker_image_from_git_source(
 
 ### Pipeline
 
-A Pipeline object is like function declaration.
+A `Pipeline` object is like function declaration, according to the [definition](https://github.com/tektoncd/pipeline/blob/master/docs/pipelines.md).
 
-A Pipeline in Tekton defined an ordered series of Tasks. Users can specify whether
+A `Pipeline` in Tekton defines an ordered series of Tasks. Users can specify whether
 the output of a `Task` is used as an input for the next `Task` using `from` property on `PipelineResources`
 
 As the following example comes from [Tekton's tutorial](https://github.com/tektoncd/pipeline/blob/master/docs/tutorial.md#creating-and-running-a-pipeline)
@@ -252,15 +253,170 @@ spec:
           value: "spec.template.spec.containers[0].image"
 ```
 
+The above `Pipeline` is referencing a `Task` called `deploy-using-kubectl` defined as follows:
+
+``` yaml
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: deploy-using-kubectl
+spec:
+  params:
+    - name: path
+      type: string
+      description: Path to the manifest to apply
+    - name: yamlPathToImage
+      type: string
+      description: |
+        The path to the image to replace in the yaml manifest (arg to yq)
+  resources:
+    inputs:
+      - name: source
+        type: git
+      - name: image
+        type: image
+  steps:
+    - name: replace-image
+      image: mikefarah/yq
+      command: ["yq"]
+      args:
+        - "w"
+        - "-i"
+        - "$(params.path)"
+        - "$(params.yamlPathToImage)"
+        - "$(resources.inputs.image.url)"
+    - name: run-kubectl
+      image: lachlanevenson/k8s-kubectl
+      command: ["kubectl"]
+      args:
+        - "apply"
+        - "-f"
+        - "$(params.path)"
+```
+
 We hope Fluid users can write the following program to express the above YAML file:
 
 ``` python
+@fluid.task
+def deploy_using_kubectl(
+        source_repo: "input, git",
+        web_image: "input,image",
+        path="/workspace/source/examples/microservices/leeroy-web/kubernetes/deployment.yaml",
+        yaml_path_to_image="spec.template.spec.containers[0].image"):
+    fluid.step(image="mikefarah/yq",
+             command=["yq"],
+             args=["w",
+                   "-i",
+                   f"{path}",
+                   f"{yaml_path_to_image}",
+                   f"{image.url}"])
+    fluid.step(image="lachlanevenson/k8s-kubectl",
+             command=["kubectl"],
+             args=["apply", "-f", f"{path}"])
+
 @fluid.pipeline
-def tutorial(source_repo:"resource,git", web_image="resource,image"):
+def tutorial(source_repo: "resource,git", web_image: "resource,image"):
     build_skaffold_web = build_docker_image_from_git_source(source_repo, web_image)
 
     deploy_web = deploy_using_kubectl(source_repo, web_image)
     deploy_web.web_image.from(build_skaffold_web)
+```
+
+### Pipeline with DAG
+
+The `Pipeline Tasks` in a `Pipeline` can be connected as a Directed Acyclic Graph (DAG). Each of the Tasks is a node, which can be
+connected with an edge by:
+
+- `from`:  clauses on the PipelineResources needed by a Task.
+- `runAfter`: clauses on the Pipeline Tasks.
+
+As the following example of `Pipeline spec` comes from Tekton Pipeline tutorials:
+
+``` yaml
+- name: lint-repo
+  taskRef:
+    name: pylint
+  resources:
+    inputs:
+      - name: workspace
+        resource: my-repo
+- name: test-app
+  taskRef:
+    name: make-test
+  resources:
+    inputs:
+      - name: workspace
+        resource: my-repo
+- name: build-app
+  taskRef:
+    name: kaniko-build-app
+  runAfter:
+    - test-app
+  resources:
+    inputs:
+      - name: workspace
+        resource: my-repo
+    outputs:
+      - name: image
+        resource: my-app-image
+- name: build-frontend
+  taskRef:
+    name: kaniko-build-frontend
+  runAfter:
+    - test-app
+  resources:
+    inputs:
+      - name: workspace
+        resource: my-repo
+    outputs:
+      - name: image
+        resource: my-frontend-image
+- name: deploy-all
+  taskRef:
+    name: deploy-kubectl
+  resources:
+    inputs:
+      - name: my-app-image
+        resource: my-app-image
+        from:
+          - build-app
+      - name: my-frontend-image
+        resource: my-frontend-image
+        from:
+          - build-frontend
+```
+
+This will result in the following execution graph:
+
+``` text
+        |            |
+        v            v
+     test-app    lint-repo
+    /        \
+   v          v
+build-app  build-frontend
+   \          /
+    v        v
+    deploy-all
+```
+
+We hope users can write the following Fluid program to construct the above DAG:
+
+``` python
+@fluid.pipeline
+def dag(my_repo: "resource,git", my_app_image: "resource,image", my_frontend_image: "resource,image"):
+    lint_repo = pylint()
+    test_app = make_test()
+
+    build_app = kaniko-build-app(my_repo, my_app_image)
+    build_app.run_after(test_app)
+
+    build_frontend = kaniko-build-frontend(my_repo, my_frontend_image)
+    build_frontend.run_after(test_app)
+
+    deploy_all = deploy_kubectl(my_app_image, my_frontend_image)
+    deploy_all.inputs.my_app_image.from(build_app)
+    deploy_all.inputs.my_frontend_image.from(build_frontend)
 ```
 
 ### PipelineRun
